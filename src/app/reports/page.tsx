@@ -242,7 +242,7 @@ export default function ReportsPage() {
                         ))}
                       </Pie>
                       <Tooltip
-                        formatter={(v: number) => v.toFixed(2)}
+                        formatter={(v) => Number(v).toFixed(2)}
                         contentStyle={{ background: "#171717", border: "1px solid #262626", borderRadius: 8, fontSize: 12 }}
                       />
                       <Legend layout="vertical" verticalAlign="middle" align="right" wrapperStyle={{ fontSize: 12, color: "#a3a3a3" }} />

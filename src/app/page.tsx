@@ -193,7 +193,7 @@ export default function Dashboard() {
                     ))}
                   </Pie>
                   <Tooltip
-                    formatter={(v: number) => v.toFixed(2)}
+                    formatter={(v) => Number(v).toFixed(2)}
                     contentStyle={{
                       background: "#171717",
                       border: "1px solid #262626",

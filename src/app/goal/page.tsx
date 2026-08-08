@@ -183,7 +183,7 @@ export default function GoalPage() {
                 width={40}
               />
               <Tooltip
-                formatter={(v: number) => fmtRM(v)}
+                formatter={(v) => fmtRM(Number(v))}
                 contentStyle={{ background: "#171717", border: "1px solid #262626", borderRadius: 8, fontSize: 12 }}
               />
               <Legend wrapperStyle={{ fontSize: 12, color: "#a3a3a3" }} />
