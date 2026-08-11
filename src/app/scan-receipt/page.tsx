@@ -158,7 +158,6 @@ export default function ScanReceiptPage() {
             ref={inputRef}
             type="file"
             accept="image/*"
-            capture="environment"
             className="hidden"
             onChange={(e) => handleFile(e.target.files?.[0])}
           />
