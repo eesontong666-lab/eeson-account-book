@@ -36,7 +36,7 @@ async function extractFromImage(
 ): Promise<Extracted> {
   const categoryLine =
     categories.length > 0
-      ? `"category": "根据商家名称和收据内容判断这是哪一种消费（例如 Grab、外卖、餐厅算日常吃喝；超市、便利店算日常用品；油站、停车算交通等等），然后从这个分类清单里选一个最符合的：${categories.join("、")}。一定要原字不动地抄清单里的其中一个，实在判断不出来才填 null",`
+      ? `"category": "根据商家名称和收据内容，判断这笔消费属于「衣食住行」的哪一种，再从分类清单里选一个最符合的：食＝餐厅、外卖、超市、咖啡、零食这类吃的；衣＝服饰、鞋子、包包；住＝房租、水电、家具、日用品；行＝交通，包括 Grab、的士、油站、停车、公共交通。清单：${categories.join("、")}。一定要原字不动地抄清单里的其中一个，实在判断不出来才填 null",`
       : `"category": null,`;
 
   const prompt = `你在看一张收据的照片。请只抓这几个栏位，用 JSON 格式回答：
