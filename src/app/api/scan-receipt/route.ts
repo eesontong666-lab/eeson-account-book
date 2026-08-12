@@ -25,15 +25,27 @@ type Extracted = {
   date: string | null;
   total: number | null;
   currency: string | null;
+  category: string | null;
 };
 
-async function extractFromImage(imageBase64: string, mimeType: string, apiKey: string): Promise<Extracted> {
+async function extractFromImage(
+  imageBase64: string,
+  mimeType: string,
+  apiKey: string,
+  categories: string[]
+): Promise<Extracted> {
+  const categoryLine =
+    categories.length > 0
+      ? `"category": "根据商家名称和收据内容判断这是哪一种消费（例如 Grab、外卖、餐厅算日常吃喝；超市、便利店算日常用品；油站、停车算交通等等），然后从这个分类清单里选一个最符合的：${categories.join("、")}。一定要原字不动地抄清单里的其中一个，实在判断不出来才填 null",`
+      : `"category": null,`;
+
   const prompt = `你在看一张收据的照片。请只抓这几个栏位，用 JSON 格式回答：
 {
   "merchant": "商家名称，看不出来就填 null",
   "date": "收据上的日期，格式 YYYY-MM-DD，看不出来就填 null",
   "total": 收据最终实际要付的总额（TOTAL / GRAND TOTAL / AMOUNT DUE 那一行，不是小计 subtotal，不是单独税额），纯数字，看不出来就填 null,
-  "currency": "这张收据用的货币，3个字母的 ISO 代码，例如 MYR、USD、SGD、CHF、EUR、THB、IDR、CNY、GBP、JPY，从收据上的货币符号、代码或文字判断，看不出来就填 null"
+  "currency": "这张收据用的货币，3个字母的 ISO 代码，例如 MYR、USD、SGD、CHF、EUR、THB、IDR、CNY、GBP、JPY，从收据上的货币符号、代码或文字判断，看不出来就填 null",
+  ${categoryLine}
 }
 只回答这个 JSON，不要加其他文字或说明。`;
 
@@ -73,6 +85,7 @@ async function extractFromImage(imageBase64: string, mimeType: string, apiKey: s
       date: parsed.date ?? null,
       total: typeof parsed.total === "number" ? parsed.total : parseFloat(parsed.total) || null,
       currency: parsed.currency ?? null,
+      category: typeof parsed.category === "string" ? parsed.category : null,
     };
   } catch (err) {
     console.error("Failed to parse Gemini response:", text, err);
@@ -104,7 +117,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "服务器还没设置 Gemini API 金钥" }, { status: 500 });
   }
 
-  let body: { imageBase64: string; mimeType: string };
+  let body: { imageBase64: string; mimeType: string; categories?: string[] };
   try {
     body = await req.json();
   } catch {
@@ -116,7 +129,8 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    const extracted = await extractFromImage(body.imageBase64, body.mimeType, apiKey);
+    const categories = Array.isArray(body.categories) ? body.categories : [];
+    const extracted = await extractFromImage(body.imageBase64, body.mimeType, apiKey, categories);
 
     if (!extracted.total || extracted.total <= 0) {
       return NextResponse.json({ error: "看不出这张收据的总额，请手动填写" }, { status: 422 });
@@ -124,6 +138,7 @@ export async function POST(req: NextRequest) {
 
     const currency = normalizeCurrency(extracted.currency);
     const { myrAmount, rate } = await convertToMYR(extracted.total, currency);
+    const category = extracted.category && categories.includes(extracted.category) ? extracted.category : null;
 
     return NextResponse.json({
       merchant: extracted.merchant,
@@ -132,6 +147,7 @@ export async function POST(req: NextRequest) {
       currency,
       myrAmount,
       rate,
+      category,
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : "识别失败，请再试一次";
