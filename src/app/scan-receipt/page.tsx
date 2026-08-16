@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { addEntry, ALL_CATEGORIES } from "@/lib/entries";
+import { addEntry, ALL_CATEGORIES, EntryType } from "@/lib/entries";
 import { fetchCategoriesGrouped } from "@/lib/categories";
 import { fetchAccounts } from "@/lib/accounts";
 
@@ -12,6 +12,7 @@ type ReceiptItem = {
   file: File;
   previewUrl: string;
   status: ItemStatus;
+  type: EntryType;
   merchant: string;
   date: string;
   amount: string;
@@ -42,6 +43,7 @@ const SCAN_CONCURRENCY = 3;
 export default function ScanReceiptPage() {
   const [items, setItems] = useState<ReceiptItem[]>([]);
   const [expenseCategories, setExpenseCategories] = useState<string[]>(ALL_CATEGORIES);
+  const [incomeCategories, setIncomeCategories] = useState<string[]>([]);
   const [accountNames, setAccountNames] = useState<string[]>(["现金"]);
   const [savingAll, setSavingAll] = useState(false);
   const [savedCount, setSavedCount] = useState(0);
@@ -51,6 +53,7 @@ export default function ScanReceiptPage() {
   useEffect(() => {
     Promise.all([fetchCategoriesGrouped(), fetchAccounts()]).then(([cats, accs]) => {
       setExpenseCategories(cats.支出.length ? cats.支出 : ALL_CATEGORIES);
+      setIncomeCategories(cats.收入);
       setAccountNames(accs.map((a) => a.name));
     });
   }, []);
@@ -66,7 +69,12 @@ export default function ScanReceiptPage() {
       const res = await fetch("/api/scan-receipt", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ imageBase64, mimeType: file.type, categories: expenseCategories }),
+        body: JSON.stringify({
+          imageBase64,
+          mimeType: file.type,
+          expenseCategories,
+          incomeCategories,
+        }),
       });
       const data = await res.json();
 
@@ -77,13 +85,16 @@ export default function ScanReceiptPage() {
 
       const note =
         data.currency !== "MYR" ? `原始金额 ${data.currency} ${data.originalAmount.toFixed(2)}` : "";
+      const type: EntryType = data.type === "收入" ? "收入" : "支出";
+      const fallbackList = type === "收入" ? incomeCategories : expenseCategories;
 
       updateItem(id, {
         status: "ready",
+        type,
         merchant: data.merchant || "",
         date: data.date || todayStr(),
         amount: data.myrAmount.toFixed(2),
-        category: data.category || expenseCategories[0] || "",
+        category: data.category || fallbackList[0] || "",
         note,
       });
     } catch {
@@ -99,6 +110,7 @@ export default function ScanReceiptPage() {
       file,
       previewUrl: URL.createObjectURL(file),
       status: "scanning",
+      type: "支出",
       merchant: "",
       date: todayStr(),
       amount: "",
@@ -137,7 +149,7 @@ export default function ScanReceiptPage() {
       (it) => (it.status === "ready" || it.status === "error") && parseFloat(it.amount) > 0
     );
     if (toSave.length === 0) {
-      setGlobalError("目前没有金额填好的收据可以保存");
+      setGlobalError("目前没有金额填好的单据可以保存");
       return;
     }
 
@@ -147,7 +159,7 @@ export default function ScanReceiptPage() {
       updateItem(it.id, { status: "saving" });
       try {
         await addEntry({
-          type: "支出",
+          type: it.type,
           amount: parseFloat(it.amount),
           category: it.category,
           note: it.merchant + (it.note ? ` · ${it.note}` : ""),
@@ -180,7 +192,7 @@ export default function ScanReceiptPage() {
       <header>
         <h1 className="text-xl font-semibold text-neutral-100">扫描收据</h1>
         <p className="text-sm text-neutral-500 mt-0.5">
-          一次可以选好几张照片，AI 会自动看总额、换算 RM、还帮你选分类
+          一次可以选好几张照片，AI 会自动看金额、判断是收入还是支出、还帮你选分类
         </p>
       </header>
 
@@ -190,8 +202,8 @@ export default function ScanReceiptPage() {
           className="border-2 border-dashed border-neutral-700 rounded-2xl aspect-[3/4] flex flex-col items-center justify-center gap-3 cursor-pointer hover:border-indigo-500/50 transition bg-neutral-900"
         >
           <span className="text-4xl">📷</span>
-          <p className="text-sm text-neutral-300">拍照 / 从图库选收据</p>
-          <p className="text-xs text-neutral-600">支持 JPG、PNG，可以一次选多张</p>
+          <p className="text-sm text-neutral-300">拍照 / 从图库选单据</p>
+          <p className="text-xs text-neutral-600">收据、利息单、存款单都可以，一次选多张</p>
         </div>
       )}
 
@@ -225,7 +237,7 @@ export default function ScanReceiptPage() {
               <span className="text-5xl">✅</span>
               <p className="text-neutral-100 font-medium">已保存 {savedCount} 笔</p>
               <p className="text-sm text-neutral-500 text-center max-w-xs">
-                这些都已经记到交易记录里了，金额是 AI 帮你从收据看出来、换算成 RM 的
+                这些都已经记到交易记录里了，金额是 AI 帮你从单据看出来、换算成 RM 的
               </p>
               <button
                 onClick={resetAll}
@@ -242,6 +254,7 @@ export default function ScanReceiptPage() {
                     key={it.id}
                     item={it}
                     expenseCategories={expenseCategories}
+                    incomeCategories={incomeCategories}
                     accountNames={accountNames}
                     onChange={(patch) => updateItem(it.id, patch)}
                     onRemove={() => removeItem(it.id)}
@@ -274,6 +287,7 @@ export default function ScanReceiptPage() {
 function ReceiptCard({
   item,
   expenseCategories,
+  incomeCategories,
   accountNames,
   onChange,
   onRemove,
@@ -281,6 +295,7 @@ function ReceiptCard({
 }: {
   item: ReceiptItem;
   expenseCategories: string[];
+  incomeCategories: string[];
   accountNames: string[];
   onChange: (patch: Partial<ReceiptItem>) => void;
   onRemove: () => void;
@@ -288,13 +303,20 @@ function ReceiptCard({
 }) {
   const scanning = item.status === "scanning";
   const saving = item.status === "saving";
+  const categoryList = item.type === "收入" ? incomeCategories : expenseCategories;
+
+  function setType(type: EntryType) {
+    if (type === item.type) return;
+    const list = type === "收入" ? incomeCategories : expenseCategories;
+    onChange({ type, category: list[0] || "" });
+  }
 
   return (
     <div className="bg-neutral-900 border border-neutral-800 rounded-2xl p-3 flex flex-col gap-3">
       <div className="flex items-start gap-3">
         <div className="relative w-14 h-14 rounded-lg overflow-hidden bg-neutral-950 border border-neutral-800 shrink-0">
           {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img src={item.previewUrl} alt="收据预览" className="w-full h-full object-cover" />
+          <img src={item.previewUrl} alt="单据预览" className="w-full h-full object-cover" />
           {scanning && (
             <div className="absolute inset-0 flex items-center justify-center bg-black/50">
               <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
@@ -306,7 +328,7 @@ function ReceiptCard({
           <input
             value={item.merchant}
             onChange={(e) => onChange({ merchant: e.target.value })}
-            placeholder={scanning ? "辨识中..." : "商家名称"}
+            placeholder={scanning ? "辨识中..." : "商家 / 来源名称"}
             disabled={scanning || saving}
             className="w-full bg-transparent text-sm font-medium text-neutral-100 placeholder:text-neutral-600 disabled:opacity-50"
           />
@@ -338,15 +360,37 @@ function ReceiptCard({
 
       {!scanning && (
         <>
-          <input
-            type="number"
-            inputMode="decimal"
-            value={item.amount}
-            onChange={(e) => onChange({ amount: e.target.value })}
-            disabled={saving}
-            placeholder="金额 (RM)"
-            className="w-full bg-neutral-950 border border-neutral-800 rounded-lg px-3 py-2 text-base font-semibold text-neutral-100 disabled:opacity-50"
-          />
+          <div className="flex items-center gap-2">
+            <div className="flex rounded-lg border border-neutral-800 overflow-hidden shrink-0">
+              <button
+                onClick={() => setType("支出")}
+                disabled={saving}
+                className={`w-9 py-2 text-sm font-semibold disabled:opacity-50 ${
+                  item.type === "支出" ? "bg-rose-500/20 text-rose-400" : "text-neutral-500"
+                }`}
+              >
+                −
+              </button>
+              <button
+                onClick={() => setType("收入")}
+                disabled={saving}
+                className={`w-9 py-2 text-sm font-semibold disabled:opacity-50 ${
+                  item.type === "收入" ? "bg-emerald-500/20 text-emerald-400" : "text-neutral-500"
+                }`}
+              >
+                ＋
+              </button>
+            </div>
+            <input
+              type="number"
+              inputMode="decimal"
+              value={item.amount}
+              onChange={(e) => onChange({ amount: e.target.value })}
+              disabled={saving}
+              placeholder="金额 (RM)"
+              className="flex-1 bg-neutral-950 border border-neutral-800 rounded-lg px-3 py-2 text-base font-semibold text-neutral-100 disabled:opacity-50"
+            />
+          </div>
 
           <div className="grid grid-cols-2 gap-2">
             <select
@@ -355,7 +399,7 @@ function ReceiptCard({
               disabled={saving}
               className="w-full bg-neutral-950 border border-neutral-800 rounded-lg px-2 py-2 text-xs text-neutral-100 disabled:opacity-50"
             >
-              {expenseCategories.map((c) => (
+              {categoryList.map((c) => (
                 <option key={c}>{c}</option>
               ))}
             </select>

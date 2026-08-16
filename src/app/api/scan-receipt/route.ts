@@ -25,6 +25,7 @@ type Extracted = {
   date: string | null;
   total: number | null;
   currency: string | null;
+  type: "收入" | "支出";
   category: string | null;
 };
 
@@ -32,19 +33,22 @@ async function extractFromImage(
   imageBase64: string,
   mimeType: string,
   apiKey: string,
-  categories: string[]
+  expenseCategories: string[],
+  incomeCategories: string[]
 ): Promise<Extracted> {
-  const categoryLine =
-    categories.length > 0
-      ? `"category": "根据商家名称和收据内容，判断这笔消费属于「衣食住行」的哪一种，再从分类清单里选一个最符合的：食＝餐厅、外卖、超市、咖啡、零食这类吃的；衣＝服饰、鞋子、包包；住＝房租、水电、家具、日用品；行＝交通，包括 Grab、的士、油站、停车、公共交通。清单：${categories.join("、")}。一定要原字不动地抄清单里的其中一个，实在判断不出来才填 null",`
-      : `"category": null,`;
+  const categoryLine = `"category": "先看上面判断的 type：如果是支出，从这个清单选一个最符合的（食＝餐厅、外卖、超市、咖啡；衣＝服饰、鞋子；住＝房租、水电、家具、日用品；行＝交通，包括 Grab、的士、油站、停车）：${
+    expenseCategories.join("、") || "（没有）"
+  }。如果是收入，从这个清单选：${
+    incomeCategories.join("、") || "（没有）"
+  }。一定要原字不动地抄对应清单里的其中一个，实在判断不出来才填 null",`;
 
-  const prompt = `你在看一张收据的照片。请只抓这几个栏位，用 JSON 格式回答：
+  const prompt = `你在看一张单据的照片，可能是购物收据，也可能是利息单、存款单、转账通知这类收款证明。请只抓这几个栏位，用 JSON 格式回答：
 {
-  "merchant": "商家名称，看不出来就填 null",
-  "date": "收据上的日期，格式 YYYY-MM-DD，看不出来就填 null",
-  "total": 收据最终实际要付的总额（TOTAL / GRAND TOTAL / AMOUNT DUE 那一行，不是小计 subtotal，不是单独税额），纯数字，看不出来就填 null,
-  "currency": "这张收据用的货币，3个字母的 ISO 代码，例如 MYR、USD、SGD、CHF、EUR、THB、IDR、CNY、GBP、JPY，从收据上的货币符号、代码或文字判断，看不出来就填 null",
+  "merchant": "商家或单位名称，看不出来就填 null",
+  "date": "单据上的日期，格式 YYYY-MM-DD，看不出来就填 null",
+  "total": 最终金额（TOTAL / GRAND TOTAL / AMOUNT DUE / 利息金额 / 存入金额 那一行，不是小计 subtotal，不是单独税额），纯数字，看不出来就填 null,
+  "currency": "这张单据用的货币，3个字母的 ISO 代码，例如 MYR、USD、SGD、CHF、EUR、THB、IDR、CNY、GBP、JPY，从单据上的货币符号、代码或文字判断，看不出来就填 null",
+  "type": "这笔钱是「收入」还是「支出」？银行利息、存款回条、转入通知、退款这类钱进来的算收入；一般消费购物、账单、付款单这类钱出去的算支出。只能填 收入 或 支出，看不出来就填 支出",
   ${categoryLine}
 }
 只回答这个 JSON，不要加其他文字或说明。`;
@@ -85,6 +89,7 @@ async function extractFromImage(
       date: parsed.date ?? null,
       total: typeof parsed.total === "number" ? parsed.total : parseFloat(parsed.total) || null,
       currency: parsed.currency ?? null,
+      type: parsed.type === "收入" ? "收入" : "支出",
       category: typeof parsed.category === "string" ? parsed.category : null,
     };
   } catch (err) {
@@ -117,7 +122,12 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "服务器还没设置 Gemini API 金钥" }, { status: 500 });
   }
 
-  let body: { imageBase64: string; mimeType: string; categories?: string[] };
+  let body: {
+    imageBase64: string;
+    mimeType: string;
+    expenseCategories?: string[];
+    incomeCategories?: string[];
+  };
   try {
     body = await req.json();
   } catch {
@@ -129,16 +139,24 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    const categories = Array.isArray(body.categories) ? body.categories : [];
-    const extracted = await extractFromImage(body.imageBase64, body.mimeType, apiKey, categories);
+    const expenseCategories = Array.isArray(body.expenseCategories) ? body.expenseCategories : [];
+    const incomeCategories = Array.isArray(body.incomeCategories) ? body.incomeCategories : [];
+    const extracted = await extractFromImage(
+      body.imageBase64,
+      body.mimeType,
+      apiKey,
+      expenseCategories,
+      incomeCategories
+    );
 
     if (!extracted.total || extracted.total <= 0) {
-      return NextResponse.json({ error: "看不出这张收据的总额，请手动填写" }, { status: 422 });
+      return NextResponse.json({ error: "看不出这张单据的金额，请手动填写" }, { status: 422 });
     }
 
     const currency = normalizeCurrency(extracted.currency);
     const { myrAmount, rate } = await convertToMYR(extracted.total, currency);
-    const category = extracted.category && categories.includes(extracted.category) ? extracted.category : null;
+    const validCategories = extracted.type === "收入" ? incomeCategories : expenseCategories;
+    const category = extracted.category && validCategories.includes(extracted.category) ? extracted.category : null;
 
     return NextResponse.json({
       merchant: extracted.merchant,
@@ -147,6 +165,7 @@ export async function POST(req: NextRequest) {
       currency,
       myrAmount,
       rate,
+      type: extracted.type,
       category,
     });
   } catch (err) {
