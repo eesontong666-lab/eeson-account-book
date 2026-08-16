@@ -8,9 +8,11 @@ import { MAIN_INCOME_CATEGORY, isMainIncomeSplittable, splitMainIncome } from "@
 
 export default function AddTransactionForm({
   initial,
+  presetAccount,
   onSaved,
 }: {
   initial?: Entry;
+  presetAccount?: string;
   onSaved: () => void;
 }) {
   const isEdit = !!initial;
@@ -18,7 +20,7 @@ export default function AddTransactionForm({
   const [type, setType] = useState<EntryType>(initial?.type ?? "支出");
   const [amount, setAmount] = useState(initial ? String(initial.amount) : "");
   const [category, setCategory] = useState(initial?.category ?? "");
-  const [account, setAccount] = useState(initial?.account ?? "");
+  const [account, setAccount] = useState(initial?.account ?? presetAccount ?? "");
   const [note, setNote] = useState(initial?.note ?? "");
   const [date, setDate] = useState(() =>
     initial ? initial.occurred_at.slice(0, 10) : new Date().toISOString().slice(0, 10)
@@ -37,7 +39,7 @@ export default function AddTransactionForm({
         const names = accs.map((a) => a.name);
         setAccountNames(names);
         if (!category) setCategory(cats[type][0] ?? "");
-        if (!account) setAccount(names[0] ?? "");
+        if (!account) setAccount(presetAccount ?? names[0] ?? "");
       })
       .finally(() => setLoadingOptions(false));
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -51,7 +53,7 @@ export default function AddTransactionForm({
   // 只有新增（不是编辑）而且选到「主收入」分类时，才进入自动拆分模式。
   // 编辑既有的一笔桶记录（例如 Transactions 里已经生成的「投资」那一行）
   // 永远走原本单笔编辑流程，不会重新触发拆分 UI。
-  const isMainIncomeSplit = !isEdit && type === "收入" && category === MAIN_INCOME_CATEGORY;
+  const isMainIncomeSplit = !isEdit && !presetAccount && type === "收入" && category === MAIN_INCOME_CATEGORY;
   const amountValue = parseFloat(amount) || 0;
   const splitPreview = isMainIncomeSplit ? splitMainIncome(amountValue) : [];
   const splitValid = !isMainIncomeSplit || isMainIncomeSplittable(amountValue);
@@ -222,17 +224,23 @@ export default function AddTransactionForm({
         <div className="grid grid-cols-2 gap-3">
           <div>
             <label className="text-xs text-neutral-500">账户</label>
-            <select
-              value={account}
-              onChange={(e) => setAccount(e.target.value)}
-              className="w-full mt-1 bg-neutral-950 border border-neutral-800 rounded-lg px-3 py-2 text-sm text-neutral-100"
-            >
-              {accountNames.map((a) => (
-                <option key={a} value={a}>
-                  {a}
-                </option>
-              ))}
-            </select>
+            {presetAccount ? (
+              <p className="w-full mt-1 bg-neutral-950 border border-neutral-800 rounded-lg px-3 py-2 text-sm text-neutral-100">
+                {presetAccount}
+              </p>
+            ) : (
+              <select
+                value={account}
+                onChange={(e) => setAccount(e.target.value)}
+                className="w-full mt-1 bg-neutral-950 border border-neutral-800 rounded-lg px-3 py-2 text-sm text-neutral-100"
+              >
+                {accountNames.map((a) => (
+                  <option key={a} value={a}>
+                    {a}
+                  </option>
+                ))}
+              </select>
+            )}
           </div>
           <div>
             <label className="text-xs text-neutral-500">日期</label>

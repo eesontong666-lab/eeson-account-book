@@ -25,6 +25,7 @@ import {
   updateTransfer,
 } from "@/lib/transfers";
 import Calculator from "@/components/Calculator";
+import AddTransactionForm from "@/components/AddTransactionForm";
 
 export default function AccountsPage() {
   const [accounts, setAccounts] = useState<AccountWithBalance[]>([]);
@@ -36,6 +37,8 @@ export default function AccountsPage() {
   const [editing, setEditing] = useState<AccountWithBalance | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<AccountWithBalance | null>(null);
   const [deleteUsageCount, setDeleteUsageCount] = useState(0);
+
+  const [adjustTarget, setAdjustTarget] = useState<AccountWithBalance | null>(null);
 
   const [transferModalOpen, setTransferModalOpen] = useState(false);
   const [editingTransfer, setEditingTransfer] = useState<Transfer | null>(null);
@@ -250,6 +253,13 @@ export default function AccountsPage() {
           </div>
           <div className="flex gap-1">
             <button
+              onClick={() => setAdjustTarget(acc)}
+              aria-label="加减一笔"
+              className="w-7 h-7 flex items-center justify-center rounded-lg text-neutral-500 hover:bg-neutral-800 hover:text-indigo-400 text-sm font-semibold"
+            >
+              ±
+            </button>
+            <button
               onClick={() => openEdit(acc)}
               className="w-7 h-7 flex items-center justify-center rounded-lg text-neutral-500 hover:bg-neutral-800 hover:text-neutral-200 text-xs"
             >
@@ -439,6 +449,22 @@ export default function AccountsPage() {
         <p className="text-sm font-medium text-neutral-300 mb-3">计算机</p>
         <Calculator />
       </div>
+
+      <Modal
+        open={!!adjustTarget}
+        onClose={() => setAdjustTarget(null)}
+        title={adjustTarget ? `「${adjustTarget.name}」加减一笔` : "加减一笔"}
+      >
+        {adjustTarget && (
+          <AddTransactionForm
+            presetAccount={adjustTarget.name}
+            onSaved={() => {
+              setAdjustTarget(null);
+              load();
+            }}
+          />
+        )}
+      </Modal>
 
       <Modal open={modalOpen} onClose={() => setModalOpen(false)} title={editing ? "编辑账户" : "新增账户"}>
         <AccountForm initial={editing} onCancel={() => setModalOpen(false)} onSave={handleSave} />
