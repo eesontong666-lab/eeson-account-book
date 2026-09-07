@@ -35,23 +35,27 @@ async function extractFromImage(
   apiKey: string,
   expenseCategories: string[],
   incomeCategories: string[]
-): Promise<Extracted> {
-  const categoryLine = `"category": "先看上面判断的 type：如果是支出，从这个清单选一个最符合的（食＝餐厅、外卖、超市、咖啡；衣＝服饰、鞋子；住＝房租、水电、家具、日用品；行＝交通，包括 Grab、的士、油站、停车）：${
+): Promise<Extracted[]> {
+  const categoryLine = `"category": "先看上面判断的 type：如果是支出，从这个清单选一个最符合的（食＝餐厅、外卖、超市、咖啡；衣＝服饰、鞋子；住＝房租、水电、家具、日用品；行＝交通，包括 Grab、的士、油站、停车；转账给别人、汇款这类如果没有更贴切的分类就选其他支出）：${
     expenseCategories.join("、") || "（没有）"
   }。如果是收入，从这个清单选：${
     incomeCategories.join("、") || "（没有）"
   }。一定要原字不动地抄对应清单里的其中一个，实在判断不出来才填 null",`;
 
-  const prompt = `你在看一张单据的照片，可能是购物收据，也可能是利息单、存款单、转账通知这类收款证明。请只抓这几个栏位，用 JSON 格式回答：
+  const prompt = `你在看一张财务相关的照片，可能是两种：
+(a) 一张购物收据 —— 只代表一笔交易，只抓 TOTAL / GRAND TOTAL / AMOUNT DUE 那一行的最终金额
+(b) 手机银行、电子钱包 App 的交易记录截图 —— 上面可能列了好几笔交易（例如一排一排的转账、消费、利息记录），要把每一笔都个别抓出来，图片上看到几笔就抓几笔，不要漏掉也不要多加
+
+请把这张图片里每一笔交易都抓出来，回答一个 JSON 陣列，陣列里每一项的格式：
 {
-  "merchant": "商家或单位名称，看不出来就填 null",
-  "date": "单据上的日期，格式 YYYY-MM-DD，看不出来就填 null",
-  "total": 最终金额（TOTAL / GRAND TOTAL / AMOUNT DUE / 利息金额 / 存入金额 那一行，不是小计 subtotal，不是单独税额），纯数字，看不出来就填 null,
-  "currency": "这张单据用的货币，3个字母的 ISO 代码，例如 MYR、USD、SGD、CHF、EUR、THB、IDR、CNY、GBP、JPY，从单据上的货币符号、代码或文字判断，看不出来就填 null",
-  "type": "这笔钱是「收入」还是「支出」？银行利息、存款回条、转入通知、退款这类钱进来的算收入；一般消费购物、账单、付款单这类钱出去的算支出。只能填 收入 或 支出，看不出来就填 支出",
+  "merchant": "商家名称、收款人名字，或者这笔交易的备注文字，看不出来就填 null",
+  "date": "这笔交易的日期，格式 YYYY-MM-DD。如果图片用日期把好几笔交易分组（例如用「Thursday, 20 Aug 2026」当一组的标题），这组底下的交易都算这个日期。看不出来就填 null",
+  "total": 这笔交易的金额，纯数字，看不出来就填 null,
+  "currency": "这笔交易用的货币，3个字母的 ISO 代码，例如 MYR、USD、SGD、CHF、EUR、THB、IDR、CNY、GBP、JPY，看不出来默认 MYR",
+  "type": "关键：如果画面上金额有颜色区分——金额是黑色/深色的是「支出」（钱出去了，包括转账给别人、消费、付款）；金额是青色、绿色或蓝绿色而且前面有加号（+）的是「收入」（钱进来了，例如 Interest 利息、收到的转账）。如果是普通购物收据没有颜色区分，一般算「支出」。只能填 收入 或 支出",
   ${categoryLine}
 }
-只回答这个 JSON，不要加其他文字或说明。`;
+只回答这个 JSON 陣列，不要加其他文字或说明，也不要用 markdown 包起来。`;
 
   const res = await fetch(
     `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent?key=${apiKey}`,
@@ -73,7 +77,7 @@ async function extractFromImage(
   if (!res.ok) {
     const detail = await res.text();
     console.error("Gemini vision error:", res.status, detail);
-    throw new Error("AI 看不懂这张收据");
+    throw new Error("AI 看不懂这张图片");
   }
 
   const data = await res.json();
@@ -84,14 +88,15 @@ async function extractFromImage(
 
   try {
     const parsed = JSON.parse(cleaned);
-    return {
+    const list = Array.isArray(parsed) ? parsed : [parsed];
+    return list.map((parsed) => ({
       merchant: parsed.merchant ?? null,
       date: parsed.date ?? null,
       total: typeof parsed.total === "number" ? parsed.total : parseFloat(parsed.total) || null,
       currency: parsed.currency ?? null,
       type: parsed.type === "收入" ? "收入" : "支出",
       category: typeof parsed.category === "string" ? parsed.category : null,
-    };
+    }));
   } catch (err) {
     console.error("Failed to parse Gemini response:", text, err);
     throw new Error("看不懂 AI 回传的内容");
@@ -141,7 +146,7 @@ export async function POST(req: NextRequest) {
   try {
     const expenseCategories = Array.isArray(body.expenseCategories) ? body.expenseCategories : [];
     const incomeCategories = Array.isArray(body.incomeCategories) ? body.incomeCategories : [];
-    const extracted = await extractFromImage(
+    const extractedList = await extractFromImage(
       body.imageBase64,
       body.mimeType,
       apiKey,
@@ -149,25 +154,33 @@ export async function POST(req: NextRequest) {
       incomeCategories
     );
 
-    if (!extracted.total || extracted.total <= 0) {
-      return NextResponse.json({ error: "看不出这张单据的金额，请手动填写" }, { status: 422 });
+    const valid = extractedList.filter((e) => e.total && e.total > 0);
+    if (valid.length === 0) {
+      return NextResponse.json({ error: "看不出这张图片里的金额，请手动填写" }, { status: 422 });
     }
 
-    const currency = normalizeCurrency(extracted.currency);
-    const { myrAmount, rate } = await convertToMYR(extracted.total, currency);
-    const validCategories = extracted.type === "收入" ? incomeCategories : expenseCategories;
-    const category = extracted.category && validCategories.includes(extracted.category) ? extracted.category : null;
+    const transactions = await Promise.all(
+      valid.map(async (extracted) => {
+        const currency = normalizeCurrency(extracted.currency);
+        const { myrAmount, rate } = await convertToMYR(extracted.total as number, currency);
+        const validCategories = extracted.type === "收入" ? incomeCategories : expenseCategories;
+        const category =
+          extracted.category && validCategories.includes(extracted.category) ? extracted.category : null;
 
-    return NextResponse.json({
-      merchant: extracted.merchant,
-      date: extracted.date,
-      originalAmount: extracted.total,
-      currency,
-      myrAmount,
-      rate,
-      type: extracted.type,
-      category,
-    });
+        return {
+          merchant: extracted.merchant,
+          date: extracted.date,
+          originalAmount: extracted.total,
+          currency,
+          myrAmount,
+          rate,
+          type: extracted.type,
+          category,
+        };
+      })
+    );
+
+    return NextResponse.json({ transactions });
   } catch (err) {
     const message = err instanceof Error ? err.message : "识别失败，请再试一次";
     return NextResponse.json({ error: message }, { status: 502 });

@@ -7,9 +7,11 @@ import { fetchAccounts } from "@/lib/accounts";
 
 type ItemStatus = "scanning" | "ready" | "error" | "saving" | "saved";
 
+const DEFAULT_ACCOUNT_NAME = "日常消费";
+
 type ReceiptItem = {
   id: string;
-  file: File;
+  sourceId: string;
   previewUrl: string;
   status: ItemStatus;
   type: EntryType;
@@ -20,6 +22,16 @@ type ReceiptItem = {
   account: string;
   note: string;
   errorMsg?: string;
+};
+
+type ScannedTransaction = {
+  merchant: string | null;
+  date: string | null;
+  originalAmount: number;
+  currency: string;
+  myrAmount: number;
+  type: "收入" | "支出";
+  category: string | null;
 };
 
 function todayStr(): string {
@@ -49,6 +61,7 @@ export default function ScanReceiptPage() {
   const [savedCount, setSavedCount] = useState(0);
   const [globalError, setGlobalError] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
+  const filesRef = useRef<Map<string, { file: File; previewUrl: string }>>(new Map());
 
   useEffect(() => {
     Promise.all([fetchCategoriesGrouped(), fetchAccounts()]).then(([cats, accs]) => {
@@ -58,12 +71,21 @@ export default function ScanReceiptPage() {
     });
   }, []);
 
+  function defaultAccount(): string {
+    return accountNames.includes(DEFAULT_ACCOUNT_NAME) ? DEFAULT_ACCOUNT_NAME : accountNames[0] || "";
+  }
+
   function updateItem(id: string, patch: Partial<ReceiptItem>) {
     setItems((prev) => prev.map((it) => (it.id === id ? { ...it, ...patch } : it)));
   }
 
-  async function scanOne(id: string, file: File) {
-    updateItem(id, { status: "scanning", errorMsg: undefined });
+  async function scanOne(sourceId: string, file: File, previewUrl: string) {
+    setItems((prev) =>
+      prev.map((it) =>
+        it.id === sourceId ? { ...it, status: "scanning" as ItemStatus, errorMsg: undefined } : it
+      )
+    );
+
     try {
       const imageBase64 = await fileToBase64(file);
       const res = await fetch("/api/scan-receipt", {
@@ -79,57 +101,89 @@ export default function ScanReceiptPage() {
       const data = await res.json();
 
       if (!res.ok) {
-        updateItem(id, { status: "error", errorMsg: data.error || "识别失败，请手动填写" });
+        setItems((prev) =>
+          prev.map((it) =>
+            it.id === sourceId
+              ? { ...it, status: "error", errorMsg: data.error || "识别失败，请手动填写" }
+              : it
+          )
+        );
         return;
       }
 
-      const note =
-        data.currency !== "MYR" ? `原始金额 ${data.currency} ${data.originalAmount.toFixed(2)}` : "";
-      const type: EntryType = data.type === "收入" ? "收入" : "支出";
-      const fallbackList = type === "收入" ? incomeCategories : expenseCategories;
+      const transactions: ScannedTransaction[] = Array.isArray(data.transactions) ? data.transactions : [];
+      if (transactions.length === 0) {
+        setItems((prev) =>
+          prev.map((it) => (it.id === sourceId ? { ...it, status: "error", errorMsg: "看不出金额，请手动填写" } : it))
+        );
+        return;
+      }
 
-      updateItem(id, {
-        status: "ready",
-        type,
-        merchant: data.merchant || "",
-        date: data.date || todayStr(),
-        amount: data.myrAmount.toFixed(2),
-        category: data.category || fallbackList[0] || "",
-        note,
+      const newRows: ReceiptItem[] = transactions.map((tx, i) => {
+        const type: EntryType = tx.type === "收入" ? "收入" : "支出";
+        const fallbackList = type === "收入" ? incomeCategories : expenseCategories;
+        const note = tx.currency !== "MYR" ? `原始金额 ${tx.currency} ${tx.originalAmount.toFixed(2)}` : "";
+        return {
+          id: `${sourceId}-${i}`,
+          sourceId,
+          previewUrl,
+          status: "ready",
+          type,
+          merchant: tx.merchant || "",
+          date: tx.date || todayStr(),
+          amount: tx.myrAmount.toFixed(2),
+          category: tx.category || fallbackList[0] || "",
+          account: defaultAccount(),
+          note,
+        };
+      });
+
+      setItems((prev) => {
+        const withoutPlaceholder = prev.filter((it) => it.id !== sourceId);
+        return [...withoutPlaceholder, ...newRows];
       });
     } catch {
-      updateItem(id, { status: "error", errorMsg: "识别失败，请手动填写" });
+      setItems((prev) =>
+        prev.map((it) => (it.id === sourceId ? { ...it, status: "error", errorMsg: "识别失败，请手动填写" } : it))
+      );
     }
   }
 
   function handleFiles(fileList: FileList | null) {
     if (!fileList || fileList.length === 0) return;
     const files = Array.from(fileList);
-    const newItems: ReceiptItem[] = files.map((file) => ({
-      id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
-      file,
-      previewUrl: URL.createObjectURL(file),
+    const placeholders: { sourceId: string; file: File; previewUrl: string }[] = files.map((file) => {
+      const sourceId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      const previewUrl = URL.createObjectURL(file);
+      filesRef.current.set(sourceId, { file, previewUrl });
+      return { sourceId, file, previewUrl };
+    });
+
+    const newPlaceholderItems: ReceiptItem[] = placeholders.map((p) => ({
+      id: p.sourceId,
+      sourceId: p.sourceId,
+      previewUrl: p.previewUrl,
       status: "scanning",
       type: "支出",
       merchant: "",
       date: todayStr(),
       amount: "",
       category: expenseCategories[0] || "",
-      account: accountNames[0] || "",
+      account: defaultAccount(),
       note: "",
     }));
 
-    setItems((prev) => [...prev, ...newItems]);
+    setItems((prev) => [...prev, ...newPlaceholderItems]);
     setGlobalError("");
 
     let idx = 0;
     async function worker() {
-      while (idx < newItems.length) {
-        const mine = newItems[idx++];
-        await scanOne(mine.id, mine.file);
+      while (idx < placeholders.length) {
+        const mine = placeholders[idx++];
+        await scanOne(mine.sourceId, mine.file, mine.previewUrl);
       }
     }
-    for (let w = 0; w < Math.min(SCAN_CONCURRENCY, newItems.length); w++) worker();
+    for (let w = 0; w < Math.min(SCAN_CONCURRENCY, placeholders.length); w++) worker();
 
     if (inputRef.current) inputRef.current.value = "";
   }
@@ -138,9 +192,27 @@ export default function ScanReceiptPage() {
     setItems((prev) => prev.filter((it) => it.id !== id));
   }
 
-  function retryScan(id: string) {
-    const item = items.find((it) => it.id === id);
-    if (item) scanOne(id, item.file);
+  function retryScan(sourceId: string) {
+    const cached = filesRef.current.get(sourceId);
+    if (!cached) return;
+    setItems((prev) => {
+      const withoutGroup = prev.filter((it) => it.sourceId !== sourceId);
+      const placeholder: ReceiptItem = {
+        id: sourceId,
+        sourceId,
+        previewUrl: cached.previewUrl,
+        status: "scanning",
+        type: "支出",
+        merchant: "",
+        date: todayStr(),
+        amount: "",
+        category: expenseCategories[0] || "",
+        account: defaultAccount(),
+        note: "",
+      };
+      return [...withoutGroup, placeholder];
+    });
+    scanOne(sourceId, cached.file, cached.previewUrl);
   }
 
   async function saveAll() {
@@ -180,6 +252,7 @@ export default function ScanReceiptPage() {
     setItems([]);
     setSavedCount(0);
     setGlobalError("");
+    filesRef.current.clear();
   }
 
   const visibleItems = items.filter((it) => it.status !== "saved");
@@ -192,7 +265,7 @@ export default function ScanReceiptPage() {
       <header>
         <h1 className="text-xl font-semibold text-neutral-100">扫描收据</h1>
         <p className="text-sm text-neutral-500 mt-0.5">
-          一次可以选好几张照片，AI 会自动看金额、判断是收入还是支出、还帮你选分类
+          一次可以选好几张照片；如果是银行、电子钱包的交易记录截图，AI 会自动把里面每一笔都拆开来记
         </p>
       </header>
 
@@ -203,7 +276,7 @@ export default function ScanReceiptPage() {
         >
           <span className="text-4xl">📷</span>
           <p className="text-sm text-neutral-300">拍照 / 从图库选单据</p>
-          <p className="text-xs text-neutral-600">收据、利息单、存款单都可以，一次选多张</p>
+          <p className="text-xs text-neutral-600">收据、交易记录截图都可以，一次选多张</p>
         </div>
       )}
 
@@ -221,8 +294,8 @@ export default function ScanReceiptPage() {
           <div className="flex items-center justify-between">
             <p className="text-xs text-neutral-500">
               {scanningCount > 0 && `${scanningCount} 张辨识中 · `}
-              {readyCount > 0 && `${readyCount} 张待确认 · `}
-              已保存 {savedCount} 张
+              {readyCount > 0 && `${readyCount} 笔待确认 · `}
+              已保存 {savedCount} 笔
             </p>
             <button
               onClick={() => inputRef.current?.click()}
@@ -258,7 +331,7 @@ export default function ScanReceiptPage() {
                     accountNames={accountNames}
                     onChange={(patch) => updateItem(it.id, patch)}
                     onRemove={() => removeItem(it.id)}
-                    onRetry={() => retryScan(it.id)}
+                    onRetry={() => retryScan(it.sourceId)}
                   />
                 ))}
               </div>
@@ -274,7 +347,7 @@ export default function ScanReceiptPage() {
                   ? "保存中..."
                   : scanningCount > 0
                   ? "还有照片在辨识中..."
-                  : `保存全部（${readyCount} 张）`}
+                  : `保存全部（${readyCount} 笔）`}
               </button>
             </>
           )}
