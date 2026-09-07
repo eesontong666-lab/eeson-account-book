@@ -13,7 +13,6 @@ import {
   XAxis,
 } from "recharts";
 import { Entry, fetchEntriesForRange, fetchMonthlyTrend } from "@/lib/entries";
-import AnalysisText from "@/components/AnalysisText";
 
 const COLORS = ["#818cf8", "#f43f5e", "#f59e0b", "#0ea5e9", "#a855f7", "#84cc16"];
 const MONTH_SHORT = ["1月", "2月", "3月", "4月", "5月", "6月", "7月", "8月", "9月", "10月", "11月", "12月"];
@@ -50,17 +49,13 @@ export default function ReportsPage() {
     { key: string; year: number; month: number; income: number; expense: number }[]
   >([]);
   const [loading, setLoading] = useState(true);
-
-  const [aiText, setAiText] = useState("");
-  const [aiLoading, setAiLoading] = useState(false);
-  const [aiError, setAiError] = useState("");
+  const [selectedCategory, setSelectedCategory] = useState<string | null>(null);
 
   const { start, end, label } = rangeFor(period);
 
   useEffect(() => {
     setLoading(true);
-    setAiText("");
-    setAiError("");
+    setSelectedCategory(null);
     Promise.all([fetchEntriesForRange(start, end), fetchMonthlyTrend(12)])
       .then(([e, t]) => {
         setEntries(e);
@@ -90,41 +85,11 @@ export default function ReportsPage() {
   const net = income - expense;
   const trendData = trend.map((t) => ({ name: MONTH_SHORT[t.month], 收入: t.income, 支出: t.expense }));
 
-  async function runAnalysis() {
-    setAiLoading(true);
-    setAiError("");
-    try {
-      const res = await fetch("/api/analyze", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          periodLabel: label,
-          income,
-          expense,
-          net,
-          entries: entries.map((e) => ({
-            type: e.type,
-            amount: e.amount,
-            category: e.category,
-            note: e.note,
-            account: e.account,
-            occurred_at: e.occurred_at,
-          })),
-          trend,
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        setAiError(data.error || "分析失败，请再试一次");
-        return;
-      }
-      setAiText(data.analysis);
-    } catch {
-      setAiError("连接失败，请检查网络后再试");
-    } finally {
-      setAiLoading(false);
-    }
-  }
+  const categoryEntries = selectedCategory
+    ? entries
+        .filter((e) => e.type === "支出" && e.category === selectedCategory)
+        .sort((a, b) => b.occurred_at.localeCompare(a.occurred_at))
+    : [];
 
   return (
     <div className="max-w-6xl mx-auto px-4 sm:px-6 py-6 flex flex-col gap-5">
@@ -181,29 +146,6 @@ export default function ReportsPage() {
             </div>
           </div>
 
-          <div className="bg-neutral-900 border border-neutral-800 rounded-2xl p-4 flex flex-col gap-3">
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-sm font-medium text-neutral-300">AI 智能分析</p>
-                <p className="text-xs text-neutral-500 mt-0.5">让 AI 帮你看看这段数据有没有需要注意的地方</p>
-              </div>
-              <button
-                onClick={runAnalysis}
-                disabled={aiLoading}
-                className="shrink-0 bg-indigo-500 hover:bg-indigo-400 transition text-white text-sm font-medium px-4 py-2 rounded-xl disabled:opacity-60"
-              >
-                {aiLoading ? "分析中..." : aiText ? "重新分析" : "开始分析"}
-              </button>
-            </div>
-            {aiError && <p className="text-sm text-rose-400">{aiError}</p>}
-            {aiLoading && <p className="text-sm text-neutral-600 py-6 text-center">AI 正在看数据，稍等一下...</p>}
-            {!aiLoading && aiText && (
-              <div className="border-t border-neutral-800 pt-3">
-                <AnalysisText text={aiText} />
-              </div>
-            )}
-          </div>
-
           <div className="grid lg:grid-cols-5 gap-4">
             <div className="lg:col-span-3 bg-neutral-900 border border-neutral-800 rounded-2xl p-4">
               <p className="text-sm font-medium text-neutral-300 mb-3">每月支出趋势（近12个月）</p>
@@ -255,29 +197,58 @@ export default function ReportsPage() {
 
           <div className="bg-neutral-900 border border-neutral-800 rounded-2xl p-4">
             <p className="text-sm font-medium text-neutral-300 mb-3">花最多的分类</p>
+            <p className="text-xs text-neutral-600 -mt-2 mb-3">点一个分类，看这段期间的详细支出</p>
             {expenseByCategory.length === 0 ? (
               <p className="text-sm text-neutral-600 text-center py-8">这段期间还没有支出记录</p>
             ) : (
               <ul className="flex flex-col gap-3">
                 {expenseByCategory.slice(0, 6).map((c, i) => {
                   const pct = expense > 0 ? (c.value / expense) * 100 : 0;
+                  const isSelected = selectedCategory === c.name;
                   return (
-                    <li key={c.name} className="flex items-center gap-3">
-                      <span className="text-xs text-neutral-500 w-4">{i + 1}</span>
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center justify-between text-sm mb-1">
-                          <span className="text-neutral-200 truncate">{c.name}</span>
-                          <span className="text-neutral-400">
-                            RM {c.value.toFixed(0)} · {pct.toFixed(0)}%
-                          </span>
+                    <li key={c.name}>
+                      <button
+                        onClick={() => setSelectedCategory(isSelected ? null : c.name)}
+                        className="w-full flex items-center gap-3 text-left"
+                      >
+                        <span className="text-xs text-neutral-500 w-4">{i + 1}</span>
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center justify-between text-sm mb-1">
+                            <span className={isSelected ? "text-indigo-400" : "text-neutral-200"}>
+                              {c.name}
+                            </span>
+                            <span className="text-neutral-400">
+                              RM {c.value.toFixed(0)} · {pct.toFixed(0)}%
+                            </span>
+                          </div>
+                          <div className="h-1.5 rounded-full bg-neutral-800 overflow-hidden">
+                            <div
+                              className="h-full rounded-full"
+                              style={{ width: `${pct}%`, backgroundColor: COLORS[i % COLORS.length] }}
+                            />
+                          </div>
                         </div>
-                        <div className="h-1.5 rounded-full bg-neutral-800 overflow-hidden">
-                          <div
-                            className="h-full rounded-full"
-                            style={{ width: `${pct}%`, backgroundColor: COLORS[i % COLORS.length] }}
-                          />
+                      </button>
+
+                      {isSelected && (
+                        <div className="mt-3 ml-7 flex flex-col divide-y divide-neutral-800 border-t border-neutral-800">
+                          {categoryEntries.length === 0 ? (
+                            <p className="text-xs text-neutral-600 py-3">这段期间没有明细</p>
+                          ) : (
+                            categoryEntries.map((e) => (
+                              <div key={e.id} className="flex items-center justify-between py-2.5 text-sm">
+                                <div className="min-w-0">
+                                  <p className="text-neutral-200 truncate">{e.note || e.account}</p>
+                                  <p className="text-xs text-neutral-500">
+                                    {new Date(e.occurred_at).toLocaleDateString("zh-CN")} · {e.account}
+                                  </p>
+                                </div>
+                                <span className="text-rose-400 shrink-0 ml-3">-{e.amount.toFixed(2)}</span>
+                              </div>
+                            ))
+                          )}
                         </div>
-                      </div>
+                      )}
                     </li>
                   );
                 })}
