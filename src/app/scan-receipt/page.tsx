@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { addEntry, ALL_CATEGORIES, EntryType } from "@/lib/entries";
 import { fetchCategoriesGrouped } from "@/lib/categories";
 import { fetchAccounts } from "@/lib/accounts";
+import { addTransfer } from "@/lib/transfers";
 
 type ItemStatus = "scanning" | "ready" | "error" | "saving" | "saved";
 
@@ -21,8 +22,21 @@ type ReceiptItem = {
   category: string;
   account: string;
   note: string;
+  matchedAccount: string | null;
+  isTransfer: boolean;
+  toAccount: string;
   errorMsg?: string;
 };
+
+function matchOwnAccount(merchant: string, accountNames: string[]): string | null {
+  const cleaned = merchant
+    .replace(/^(to|转给|转账给|转账至|转入|汇给)\s*[:：]?\s*/i, "")
+    .trim()
+    .toLowerCase();
+  if (!cleaned) return null;
+  const found = accountNames.find((a) => a.toLowerCase() === cleaned);
+  return found ?? null;
+}
 
 type ScannedTransaction = {
   merchant: string | null;
@@ -123,6 +137,10 @@ export default function ScanReceiptPage() {
         const type: EntryType = tx.type === "收入" ? "收入" : "支出";
         const fallbackList = type === "收入" ? incomeCategories : expenseCategories;
         const note = tx.currency !== "MYR" ? `原始金额 ${tx.currency} ${tx.originalAmount.toFixed(2)}` : "";
+        const fromAccount = defaultAccount();
+        const matched =
+          type === "支出" ? matchOwnAccount(tx.merchant || "", accountNames) : null;
+        const matchedAccount = matched && matched !== fromAccount ? matched : null;
         return {
           id: `${sourceId}-${i}`,
           sourceId,
@@ -133,8 +151,11 @@ export default function ScanReceiptPage() {
           date: tx.date || todayStr(),
           amount: tx.myrAmount.toFixed(2),
           category: tx.category || fallbackList[0] || "",
-          account: defaultAccount(),
+          account: fromAccount,
           note,
+          matchedAccount,
+          isTransfer: !!matchedAccount,
+          toAccount: matchedAccount || "",
         };
       });
 
@@ -171,6 +192,9 @@ export default function ScanReceiptPage() {
       category: expenseCategories[0] || "",
       account: defaultAccount(),
       note: "",
+      matchedAccount: null,
+      isTransfer: false,
+      toAccount: "",
     }));
 
     setItems((prev) => [...prev, ...newPlaceholderItems]);
@@ -209,6 +233,9 @@ export default function ScanReceiptPage() {
         category: expenseCategories[0] || "",
         account: defaultAccount(),
         note: "",
+        matchedAccount: null,
+        isTransfer: false,
+        toAccount: "",
       };
       return [...withoutGroup, placeholder];
     });
@@ -228,16 +255,30 @@ export default function ScanReceiptPage() {
     setSavingAll(true);
     let count = 0;
     for (const it of toSave) {
+      if (it.isTransfer && (!it.toAccount || it.toAccount === it.account)) {
+        updateItem(it.id, { status: "error", errorMsg: "转出和转入不能是同一个账户，请检查" });
+        continue;
+      }
       updateItem(it.id, { status: "saving" });
       try {
-        await addEntry({
-          type: it.type,
-          amount: parseFloat(it.amount),
-          category: it.category,
-          note: it.merchant + (it.note ? ` · ${it.note}` : ""),
-          account: it.account,
-          occurred_at: new Date(it.date + "T12:00:00"),
-        });
+        if (it.isTransfer) {
+          await addTransfer({
+            from_account: it.account,
+            to_account: it.toAccount,
+            amount: parseFloat(it.amount),
+            note: it.merchant + (it.note ? ` · ${it.note}` : ""),
+            occurred_at: new Date(it.date + "T12:00:00"),
+          });
+        } else {
+          await addEntry({
+            type: it.type,
+            amount: parseFloat(it.amount),
+            category: it.category,
+            note: it.merchant + (it.note ? ` · ${it.note}` : ""),
+            account: it.account,
+            occurred_at: new Date(it.date + "T12:00:00"),
+          });
+        }
         updateItem(it.id, { status: "saved" });
         count++;
       } catch {
@@ -433,27 +474,45 @@ function ReceiptCard({
 
       {!scanning && (
         <>
+          {item.matchedAccount && (
+            <label className="flex items-center gap-2 bg-indigo-500/10 border border-indigo-500/30 rounded-lg px-3 py-2 text-xs text-indigo-300">
+              <input
+                type="checkbox"
+                checked={item.isTransfer}
+                onChange={(e) => onChange({ isTransfer: e.target.checked })}
+                disabled={saving}
+              />
+              这笔像是转去你自己的「{item.matchedAccount}」账户，当作转账处理（不算支出）
+            </label>
+          )}
+
           <div className="flex items-center gap-2">
-            <div className="flex rounded-lg border border-neutral-800 overflow-hidden shrink-0">
-              <button
-                onClick={() => setType("支出")}
-                disabled={saving}
-                className={`w-9 py-2 text-sm font-semibold disabled:opacity-50 ${
-                  item.type === "支出" ? "bg-rose-500/20 text-rose-400" : "text-neutral-500"
-                }`}
-              >
-                −
-              </button>
-              <button
-                onClick={() => setType("收入")}
-                disabled={saving}
-                className={`w-9 py-2 text-sm font-semibold disabled:opacity-50 ${
-                  item.type === "收入" ? "bg-emerald-500/20 text-emerald-400" : "text-neutral-500"
-                }`}
-              >
-                ＋
-              </button>
-            </div>
+            {item.isTransfer ? (
+              <span className="w-9 h-9 flex items-center justify-center rounded-lg bg-indigo-500/20 text-indigo-400 text-sm font-semibold shrink-0">
+                ↔
+              </span>
+            ) : (
+              <div className="flex rounded-lg border border-neutral-800 overflow-hidden shrink-0">
+                <button
+                  onClick={() => setType("支出")}
+                  disabled={saving}
+                  className={`w-9 py-2 text-sm font-semibold disabled:opacity-50 ${
+                    item.type === "支出" ? "bg-rose-500/20 text-rose-400" : "text-neutral-500"
+                  }`}
+                >
+                  −
+                </button>
+                <button
+                  onClick={() => setType("收入")}
+                  disabled={saving}
+                  className={`w-9 py-2 text-sm font-semibold disabled:opacity-50 ${
+                    item.type === "收入" ? "bg-emerald-500/20 text-emerald-400" : "text-neutral-500"
+                  }`}
+                >
+                  ＋
+                </button>
+              </div>
+            )}
             <input
               type="number"
               inputMode="decimal"
@@ -465,28 +524,59 @@ function ReceiptCard({
             />
           </div>
 
-          <div className="grid grid-cols-2 gap-2">
-            <select
-              value={item.category}
-              onChange={(e) => onChange({ category: e.target.value })}
-              disabled={saving}
-              className="w-full bg-neutral-950 border border-neutral-800 rounded-lg px-2 py-2 text-xs text-neutral-100 disabled:opacity-50"
-            >
-              {categoryList.map((c) => (
-                <option key={c}>{c}</option>
-              ))}
-            </select>
-            <select
-              value={item.account}
-              onChange={(e) => onChange({ account: e.target.value })}
-              disabled={saving}
-              className="w-full bg-neutral-950 border border-neutral-800 rounded-lg px-2 py-2 text-xs text-neutral-100 disabled:opacity-50"
-            >
-              {accountNames.map((a) => (
-                <option key={a}>{a}</option>
-              ))}
-            </select>
-          </div>
+          {item.isTransfer ? (
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <label className="text-[10px] text-neutral-500">从</label>
+                <select
+                  value={item.account}
+                  onChange={(e) => onChange({ account: e.target.value })}
+                  disabled={saving}
+                  className="w-full mt-0.5 bg-neutral-950 border border-neutral-800 rounded-lg px-2 py-2 text-xs text-neutral-100 disabled:opacity-50"
+                >
+                  {accountNames.map((a) => (
+                    <option key={a}>{a}</option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="text-[10px] text-neutral-500">到</label>
+                <select
+                  value={item.toAccount}
+                  onChange={(e) => onChange({ toAccount: e.target.value })}
+                  disabled={saving}
+                  className="w-full mt-0.5 bg-neutral-950 border border-neutral-800 rounded-lg px-2 py-2 text-xs text-neutral-100 disabled:opacity-50"
+                >
+                  {accountNames.map((a) => (
+                    <option key={a}>{a}</option>
+                  ))}
+                </select>
+              </div>
+            </div>
+          ) : (
+            <div className="grid grid-cols-2 gap-2">
+              <select
+                value={item.category}
+                onChange={(e) => onChange({ category: e.target.value })}
+                disabled={saving}
+                className="w-full bg-neutral-950 border border-neutral-800 rounded-lg px-2 py-2 text-xs text-neutral-100 disabled:opacity-50"
+              >
+                {categoryList.map((c) => (
+                  <option key={c}>{c}</option>
+                ))}
+              </select>
+              <select
+                value={item.account}
+                onChange={(e) => onChange({ account: e.target.value })}
+                disabled={saving}
+                className="w-full bg-neutral-950 border border-neutral-800 rounded-lg px-2 py-2 text-xs text-neutral-100 disabled:opacity-50"
+              >
+                {accountNames.map((a) => (
+                  <option key={a}>{a}</option>
+                ))}
+              </select>
+            </div>
+          )}
 
           <input
             type="date"
