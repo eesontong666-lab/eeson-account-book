@@ -12,7 +12,10 @@ import {
   Tooltip,
   XAxis,
 } from "recharts";
-import { Entry, fetchEntriesForRange, fetchMonthlyTrend } from "@/lib/entries";
+import { deleteEntry, Entry, fetchEntriesForRange, fetchMonthlyTrend } from "@/lib/entries";
+import Modal from "@/components/Modal";
+import ConfirmDialog from "@/components/ConfirmDialog";
+import AddTransactionForm from "@/components/AddTransactionForm";
 
 const COLORS = ["#818cf8", "#f43f5e", "#f59e0b", "#0ea5e9", "#a855f7", "#84cc16"];
 const MONTH_SHORT = ["1月", "2月", "3月", "4月", "5月", "6月", "7月", "8月", "9月", "10月", "11月", "12月"];
@@ -50,20 +53,33 @@ export default function ReportsPage() {
   >([]);
   const [loading, setLoading] = useState(true);
   const [selectedCategory, setSelectedCategory] = useState<string | null>(null);
+  const [editingEntry, setEditingEntry] = useState<Entry | null>(null);
+  const [deletingEntry, setDeletingEntry] = useState<Entry | null>(null);
 
   const { start, end, label } = rangeFor(period);
 
-  useEffect(() => {
+  function load() {
     setLoading(true);
-    setSelectedCategory(null);
     Promise.all([fetchEntriesForRange(start, end), fetchMonthlyTrend(12)])
       .then(([e, t]) => {
         setEntries(e);
         setTrend(t);
       })
       .finally(() => setLoading(false));
+  }
+
+  useEffect(() => {
+    setSelectedCategory(null);
+    load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [period]);
+
+  async function confirmDeleteEntry() {
+    if (!deletingEntry) return;
+    await deleteEntry(deletingEntry.id);
+    setDeletingEntry(null);
+    load();
+  }
 
   const { income, expense, expenseByCategory } = useMemo(() => {
     let income = 0;
@@ -236,14 +252,32 @@ export default function ReportsPage() {
                             <p className="text-xs text-neutral-600 py-3">这段期间没有明细</p>
                           ) : (
                             categoryEntries.map((e) => (
-                              <div key={e.id} className="flex items-center justify-between py-2.5 text-sm">
+                              <div key={e.id} className="flex items-center justify-between gap-3 py-2.5 text-sm">
                                 <div className="min-w-0">
-                                  <p className="text-neutral-200 truncate">{e.note || e.account}</p>
-                                  <p className="text-xs text-neutral-500">
-                                    {new Date(e.occurred_at).toLocaleDateString("zh-CN")} · {e.account}
+                                  <p className="text-neutral-200 truncate">
+                                    {e.note ? e.note : <span className="text-neutral-600">（没有备注）</span>}
+                                  </p>
+                                  <p className="text-xs text-neutral-500 truncate">
+                                    {new Date(e.occurred_at).toLocaleDateString("zh-CN")} · {e.account} · {e.category}
                                   </p>
                                 </div>
-                                <span className="text-rose-400 shrink-0 ml-3">-{e.amount.toFixed(2)}</span>
+                                <div className="flex items-center gap-1 shrink-0">
+                                  <span className="text-rose-400 mr-1">-{e.amount.toFixed(2)}</span>
+                                  <button
+                                    onClick={() => setEditingEntry(e)}
+                                    aria-label="编辑"
+                                    className="w-7 h-7 flex items-center justify-center rounded-lg text-neutral-500 hover:bg-neutral-800 hover:text-neutral-200 text-xs"
+                                  >
+                                    ✏️
+                                  </button>
+                                  <button
+                                    onClick={() => setDeletingEntry(e)}
+                                    aria-label="删除"
+                                    className="w-7 h-7 flex items-center justify-center rounded-lg text-neutral-500 hover:bg-neutral-800 hover:text-rose-400 text-xs"
+                                  >
+                                    🗑️
+                                  </button>
+                                </div>
                               </div>
                             ))
                           )}
@@ -257,6 +291,31 @@ export default function ReportsPage() {
           </div>
         </>
       )}
+
+      <Modal open={!!editingEntry} onClose={() => setEditingEntry(null)} title="编辑交易">
+        {editingEntry && (
+          <AddTransactionForm
+            initial={editingEntry}
+            onSaved={() => {
+              setEditingEntry(null);
+              load();
+            }}
+          />
+        )}
+      </Modal>
+
+      <ConfirmDialog
+        open={!!deletingEntry}
+        title="删除这一笔记录？"
+        message={
+          deletingEntry
+            ? `${deletingEntry.category} · RM ${deletingEntry.amount.toFixed(2)}，删除后无法恢复`
+            : ""
+        }
+        confirmLabel="删除"
+        onConfirm={confirmDeleteEntry}
+        onCancel={() => setDeletingEntry(null)}
+      />
     </div>
   );
 }
