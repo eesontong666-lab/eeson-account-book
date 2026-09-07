@@ -30,12 +30,15 @@ type ReceiptItem = {
 
 function matchOwnAccount(merchant: string, accountNames: string[]): string | null {
   const cleaned = merchant
-    .replace(/^(to|转给|转账给|转账至|转入|汇给)\s*[:：]?\s*/i, "")
+    .replace(/^(to|转给|转账给|转账至|转入|转去|转账去|过户给|过户至|过户去|汇给|存进|存入)\s*[:：]?\s*/i, "")
     .trim()
     .toLowerCase();
   if (!cleaned) return null;
-  const found = accountNames.find((a) => a.toLowerCase() === cleaned);
-  return found ?? null;
+  const exact = accountNames.find((a) => a.toLowerCase() === cleaned);
+  if (exact) return exact;
+  // 比较宽松的比对：账户名字本身有出现在这段文字里就算，
+  // 应付「转账去 IBKR」「过户 500 到 Tiger Broker」这类没被上面前缀抓到的写法
+  return accountNames.find((a) => a.length >= 2 && cleaned.includes(a.toLowerCase())) ?? null;
 }
 
 type ScannedTransaction = {
@@ -508,9 +511,16 @@ function ReceiptCard({
   const categoryList = item.type === "收入" ? incomeCategories : expenseCategories;
 
   function setType(type: EntryType) {
-    if (type === item.type) return;
+    if (!item.isTransfer && type === item.type) return;
     const list = type === "收入" ? incomeCategories : expenseCategories;
-    onChange({ type, category: list[0] || "" });
+    onChange({ type, category: list[0] || "", isTransfer: false });
+  }
+
+  function setTransferMode() {
+    if (item.isTransfer) return;
+    const suggestedTo =
+      item.matchedAccount || accountNames.find((a) => a !== item.account) || accountNames[0] || "";
+    onChange({ isTransfer: true, toAccount: item.toAccount || suggestedTo });
   }
 
   return (
@@ -566,45 +576,42 @@ function ReceiptCard({
 
       {!scanning && (
         <>
-          {item.matchedAccount && (
-            <label className="flex items-center gap-2 bg-indigo-500/10 border border-indigo-500/30 rounded-lg px-3 py-2 text-xs text-indigo-300">
-              <input
-                type="checkbox"
-                checked={item.isTransfer}
-                onChange={(e) => onChange({ isTransfer: e.target.checked })}
-                disabled={saving}
-              />
-              这笔像是转去你自己的「{item.matchedAccount}」账户，当作转账处理（不算支出）
-            </label>
+          {item.matchedAccount && !item.isTransfer && (
+            <p className="text-xs text-indigo-300 bg-indigo-500/10 border border-indigo-500/30 rounded-lg px-3 py-2">
+              💡 这笔像是转去你自己的「{item.matchedAccount}」账户，要不要点下面的「↔」当作转账？
+            </p>
           )}
 
           <div className="flex items-center gap-2">
-            {item.isTransfer ? (
-              <span className="w-9 h-9 flex items-center justify-center rounded-lg bg-indigo-500/20 text-indigo-400 text-sm font-semibold shrink-0">
+            <div className="flex rounded-lg border border-neutral-800 overflow-hidden shrink-0">
+              <button
+                onClick={() => setType("支出")}
+                disabled={saving}
+                className={`w-9 py-2 text-sm font-semibold disabled:opacity-50 ${
+                  !item.isTransfer && item.type === "支出" ? "bg-rose-500/20 text-rose-400" : "text-neutral-500"
+                }`}
+              >
+                −
+              </button>
+              <button
+                onClick={() => setType("收入")}
+                disabled={saving}
+                className={`w-9 py-2 text-sm font-semibold disabled:opacity-50 ${
+                  !item.isTransfer && item.type === "收入" ? "bg-emerald-500/20 text-emerald-400" : "text-neutral-500"
+                }`}
+              >
+                ＋
+              </button>
+              <button
+                onClick={setTransferMode}
+                disabled={saving}
+                className={`w-9 py-2 text-sm font-semibold disabled:opacity-50 ${
+                  item.isTransfer ? "bg-indigo-500/20 text-indigo-400" : "text-neutral-500"
+                }`}
+              >
                 ↔
-              </span>
-            ) : (
-              <div className="flex rounded-lg border border-neutral-800 overflow-hidden shrink-0">
-                <button
-                  onClick={() => setType("支出")}
-                  disabled={saving}
-                  className={`w-9 py-2 text-sm font-semibold disabled:opacity-50 ${
-                    item.type === "支出" ? "bg-rose-500/20 text-rose-400" : "text-neutral-500"
-                  }`}
-                >
-                  −
-                </button>
-                <button
-                  onClick={() => setType("收入")}
-                  disabled={saving}
-                  className={`w-9 py-2 text-sm font-semibold disabled:opacity-50 ${
-                    item.type === "收入" ? "bg-emerald-500/20 text-emerald-400" : "text-neutral-500"
-                  }`}
-                >
-                  ＋
-                </button>
-              </div>
-            )}
+              </button>
+            </div>
             <input
               type="number"
               inputMode="decimal"
