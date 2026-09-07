@@ -13,7 +13,7 @@ const DEFAULT_ACCOUNT_NAME = "日常消费";
 type ReceiptItem = {
   id: string;
   sourceId: string;
-  previewUrl: string;
+  previewUrl: string | null;
   status: ItemStatus;
   type: EntryType;
   merchant: string;
@@ -64,6 +64,28 @@ function fileToBase64(file: File): Promise<string> {
   });
 }
 
+function emptyPlaceholder(sourceId: string, previewUrl: string | null, defaults: {
+  category: string;
+  account: string;
+}): ReceiptItem {
+  return {
+    id: sourceId,
+    sourceId,
+    previewUrl,
+    status: "scanning",
+    type: "支出",
+    merchant: "",
+    date: todayStr(),
+    amount: "",
+    category: defaults.category,
+    account: defaults.account,
+    note: "",
+    matchedAccount: null,
+    isTransfer: false,
+    toAccount: "",
+  };
+}
+
 const SCAN_CONCURRENCY = 3;
 
 export default function ScanReceiptPage() {
@@ -74,8 +96,11 @@ export default function ScanReceiptPage() {
   const [savingAll, setSavingAll] = useState(false);
   const [savedCount, setSavedCount] = useState(0);
   const [globalError, setGlobalError] = useState("");
+  const [textInput, setTextInput] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
-  const filesRef = useRef<Map<string, { file: File; previewUrl: string }>>(new Map());
+  const sourcesRef = useRef<
+    Map<string, { kind: "file"; file: File; previewUrl: string } | { kind: "text"; text: string }>
+  >(new Map());
 
   useEffect(() => {
     Promise.all([fetchCategoriesGrouped(), fetchAccounts()]).then(([cats, accs]) => {
@@ -91,6 +116,38 @@ export default function ScanReceiptPage() {
 
   function updateItem(id: string, patch: Partial<ReceiptItem>) {
     setItems((prev) => prev.map((it) => (it.id === id ? { ...it, ...patch } : it)));
+  }
+
+  function applyTransactions(sourceId: string, transactions: ScannedTransaction[], previewUrl: string | null) {
+    const newRows: ReceiptItem[] = transactions.map((tx, i) => {
+      const type: EntryType = tx.type === "收入" ? "收入" : "支出";
+      const fallbackList = type === "收入" ? incomeCategories : expenseCategories;
+      const note = tx.currency !== "MYR" ? `原始金额 ${tx.currency} ${tx.originalAmount.toFixed(2)}` : "";
+      const fromAccount = defaultAccount();
+      const matched = type === "支出" ? matchOwnAccount(tx.merchant || "", accountNames) : null;
+      const matchedAccount = matched && matched !== fromAccount ? matched : null;
+      return {
+        id: `${sourceId}-${i}`,
+        sourceId,
+        previewUrl,
+        status: "ready",
+        type,
+        merchant: tx.merchant || "",
+        date: tx.date || todayStr(),
+        amount: tx.myrAmount.toFixed(2),
+        category: tx.category || fallbackList[0] || "",
+        account: fromAccount,
+        note,
+        matchedAccount,
+        isTransfer: !!matchedAccount,
+        toAccount: matchedAccount || "",
+      };
+    });
+
+    setItems((prev) => {
+      const withoutPlaceholder = prev.filter((it) => it.id !== sourceId);
+      return [...withoutPlaceholder, ...newRows];
+    });
   }
 
   async function scanOne(sourceId: string, file: File, previewUrl: string) {
@@ -133,36 +190,7 @@ export default function ScanReceiptPage() {
         return;
       }
 
-      const newRows: ReceiptItem[] = transactions.map((tx, i) => {
-        const type: EntryType = tx.type === "收入" ? "收入" : "支出";
-        const fallbackList = type === "收入" ? incomeCategories : expenseCategories;
-        const note = tx.currency !== "MYR" ? `原始金额 ${tx.currency} ${tx.originalAmount.toFixed(2)}` : "";
-        const fromAccount = defaultAccount();
-        const matched =
-          type === "支出" ? matchOwnAccount(tx.merchant || "", accountNames) : null;
-        const matchedAccount = matched && matched !== fromAccount ? matched : null;
-        return {
-          id: `${sourceId}-${i}`,
-          sourceId,
-          previewUrl,
-          status: "ready",
-          type,
-          merchant: tx.merchant || "",
-          date: tx.date || todayStr(),
-          amount: tx.myrAmount.toFixed(2),
-          category: tx.category || fallbackList[0] || "",
-          account: fromAccount,
-          note,
-          matchedAccount,
-          isTransfer: !!matchedAccount,
-          toAccount: matchedAccount || "",
-        };
-      });
-
-      setItems((prev) => {
-        const withoutPlaceholder = prev.filter((it) => it.id !== sourceId);
-        return [...withoutPlaceholder, ...newRows];
-      });
+      applyTransactions(sourceId, transactions, previewUrl);
     } catch {
       setItems((prev) =>
         prev.map((it) => (it.id === sourceId ? { ...it, status: "error", errorMsg: "识别失败，请手动填写" } : it))
@@ -176,26 +204,13 @@ export default function ScanReceiptPage() {
     const placeholders: { sourceId: string; file: File; previewUrl: string }[] = files.map((file) => {
       const sourceId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
       const previewUrl = URL.createObjectURL(file);
-      filesRef.current.set(sourceId, { file, previewUrl });
+      sourcesRef.current.set(sourceId, { kind: "file", file, previewUrl });
       return { sourceId, file, previewUrl };
     });
 
-    const newPlaceholderItems: ReceiptItem[] = placeholders.map((p) => ({
-      id: p.sourceId,
-      sourceId: p.sourceId,
-      previewUrl: p.previewUrl,
-      status: "scanning",
-      type: "支出",
-      merchant: "",
-      date: todayStr(),
-      amount: "",
-      category: expenseCategories[0] || "",
-      account: defaultAccount(),
-      note: "",
-      matchedAccount: null,
-      isTransfer: false,
-      toAccount: "",
-    }));
+    const newPlaceholderItems: ReceiptItem[] = placeholders.map((p) =>
+      emptyPlaceholder(p.sourceId, p.previewUrl, { category: expenseCategories[0] || "", account: defaultAccount() })
+    );
 
     setItems((prev) => [...prev, ...newPlaceholderItems]);
     setGlobalError("");
@@ -212,34 +227,84 @@ export default function ScanReceiptPage() {
     if (inputRef.current) inputRef.current.value = "";
   }
 
+  async function scanText(sourceId: string, text: string) {
+    setItems((prev) =>
+      prev.map((it) =>
+        it.id === sourceId ? { ...it, status: "scanning" as ItemStatus, errorMsg: undefined } : it
+      )
+    );
+
+    try {
+      const res = await fetch("/api/parse-text", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text, expenseCategories, incomeCategories }),
+      });
+      const data = await res.json();
+
+      if (!res.ok) {
+        setItems((prev) =>
+          prev.map((it) =>
+            it.id === sourceId
+              ? { ...it, status: "error", errorMsg: data.error || "识别失败，请手动填写" }
+              : it
+          )
+        );
+        return;
+      }
+
+      const transactions: ScannedTransaction[] = Array.isArray(data.transactions) ? data.transactions : [];
+      if (transactions.length === 0) {
+        setItems((prev) =>
+          prev.map((it) => (it.id === sourceId ? { ...it, status: "error", errorMsg: "看不出金额，请手动填写" } : it))
+        );
+        return;
+      }
+
+      applyTransactions(sourceId, transactions, null);
+    } catch {
+      setItems((prev) =>
+        prev.map((it) => (it.id === sourceId ? { ...it, status: "error", errorMsg: "识别失败，请手动填写" } : it))
+      );
+    }
+  }
+
+  function parseText() {
+    const text = textInput.trim();
+    if (!text) return;
+
+    const sourceId = `text-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    sourcesRef.current.set(sourceId, { kind: "text", text });
+    setItems((prev) => [
+      ...prev,
+      emptyPlaceholder(sourceId, null, { category: expenseCategories[0] || "", account: defaultAccount() }),
+    ]);
+    setTextInput("");
+    setGlobalError("");
+    scanText(sourceId, text);
+  }
+
   function removeItem(id: string) {
     setItems((prev) => prev.filter((it) => it.id !== id));
   }
 
   function retryScan(sourceId: string) {
-    const cached = filesRef.current.get(sourceId);
+    const cached = sourcesRef.current.get(sourceId);
     if (!cached) return;
+    const previewUrl = cached.kind === "file" ? cached.previewUrl : null;
     setItems((prev) => {
       const withoutGroup = prev.filter((it) => it.sourceId !== sourceId);
-      const placeholder: ReceiptItem = {
-        id: sourceId,
-        sourceId,
-        previewUrl: cached.previewUrl,
-        status: "scanning",
-        type: "支出",
-        merchant: "",
-        date: todayStr(),
-        amount: "",
+      const placeholder = emptyPlaceholder(sourceId, previewUrl, {
         category: expenseCategories[0] || "",
         account: defaultAccount(),
-        note: "",
-        matchedAccount: null,
-        isTransfer: false,
-        toAccount: "",
-      };
+      });
       return [...withoutGroup, placeholder];
     });
-    scanOne(sourceId, cached.file, cached.previewUrl);
+    if (cached.kind === "file") {
+      scanOne(sourceId, cached.file, cached.previewUrl);
+    } else {
+      scanText(sourceId, cached.text);
+    }
   }
 
   async function saveAll() {
@@ -293,7 +358,7 @@ export default function ScanReceiptPage() {
     setItems([]);
     setSavedCount(0);
     setGlobalError("");
-    filesRef.current.clear();
+    sourcesRef.current.clear();
   }
 
   const visibleItems = items.filter((it) => it.status !== "saved");
@@ -330,11 +395,34 @@ export default function ScanReceiptPage() {
         onChange={(e) => handleFiles(e.target.files)}
       />
 
+      <div className="bg-neutral-900 border border-neutral-800 rounded-2xl p-4 flex flex-col gap-3">
+        <div>
+          <p className="text-sm font-medium text-neutral-200">或者直接打字 / 贴文字</p>
+          <p className="text-xs text-neutral-500 mt-0.5">
+            贴银行短信、转账记录文字，或者简单打「grab 25」这样，AI 一样会帮你辨识金额和分类
+          </p>
+        </div>
+        <textarea
+          value={textInput}
+          onChange={(e) => setTextInput(e.target.value)}
+          placeholder="在这里打字或贴上文字..."
+          rows={3}
+          className="w-full bg-neutral-950 border border-neutral-800 rounded-lg px-3 py-2 text-sm text-neutral-100 placeholder:text-neutral-600 resize-none"
+        />
+        <button
+          onClick={parseText}
+          disabled={!textInput.trim()}
+          className="self-end px-4 py-2 rounded-xl bg-neutral-800 hover:bg-neutral-700 transition text-neutral-100 text-sm font-medium disabled:opacity-40"
+        >
+          识别
+        </button>
+      </div>
+
       {items.length > 0 && (
         <>
           <div className="flex items-center justify-between">
             <p className="text-xs text-neutral-500">
-              {scanningCount > 0 && `${scanningCount} 张辨识中 · `}
+              {scanningCount > 0 && `${scanningCount} 笔辨识中 · `}
               {readyCount > 0 && `${readyCount} 笔待确认 · `}
               已保存 {savedCount} 笔
             </p>
@@ -351,13 +439,13 @@ export default function ScanReceiptPage() {
               <span className="text-5xl">✅</span>
               <p className="text-neutral-100 font-medium">已保存 {savedCount} 笔</p>
               <p className="text-sm text-neutral-500 text-center max-w-xs">
-                这些都已经记到交易记录里了，金额是 AI 帮你从单据看出来、换算成 RM 的
+                这些都已经记到交易记录里了，金额是 AI 帮你看出来、换算成 RM 的
               </p>
               <button
                 onClick={resetAll}
                 className="mt-2 px-5 py-2.5 rounded-xl bg-neutral-900 border border-neutral-800 text-neutral-200 text-sm"
               >
-                再扫一批
+                再来一批
               </button>
             </div>
           ) : (
@@ -387,7 +475,7 @@ export default function ScanReceiptPage() {
                 {savingAll
                   ? "保存中..."
                   : scanningCount > 0
-                  ? "还有照片在辨识中..."
+                  ? "还有在辨识中..."
                   : `保存全部（${readyCount} 笔）`}
               </button>
             </>
@@ -428,9 +516,13 @@ function ReceiptCard({
   return (
     <div className="bg-neutral-900 border border-neutral-800 rounded-2xl p-3 flex flex-col gap-3">
       <div className="flex items-start gap-3">
-        <div className="relative w-14 h-14 rounded-lg overflow-hidden bg-neutral-950 border border-neutral-800 shrink-0">
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img src={item.previewUrl} alt="单据预览" className="w-full h-full object-cover" />
+        <div className="relative w-14 h-14 rounded-lg overflow-hidden bg-neutral-950 border border-neutral-800 shrink-0 flex items-center justify-center">
+          {item.previewUrl ? (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img src={item.previewUrl} alt="单据预览" className="w-full h-full object-cover" />
+          ) : (
+            <span className="text-xl">📝</span>
+          )}
           {scanning && (
             <div className="absolute inset-0 flex items-center justify-center bg-black/50">
               <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />

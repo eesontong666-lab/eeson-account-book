@@ -1,33 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
+import {
+  categoryPromptLine,
+  ExtractedTransaction,
+  finalizeTransactions,
+  parseGeminiJsonArray,
+  toExtractedTransaction,
+} from "@/lib/currency";
 
 const MODEL = "gemini-3.6-flash";
-
-const CURRENCY_ALIASES: Record<string, string> = {
-  RM: "MYR",
-  "S$": "SGD",
-  "US$": "USD",
-  "$": "USD",
-  "€": "EUR",
-  "£": "GBP",
-  "¥": "JPY",
-  FR: "CHF",
-  "FR.": "CHF",
-};
-
-function normalizeCurrency(raw: string | null): string {
-  if (!raw) return "MYR";
-  const upper = raw.trim().toUpperCase();
-  return CURRENCY_ALIASES[upper] || upper;
-}
-
-type Extracted = {
-  merchant: string | null;
-  date: string | null;
-  total: number | null;
-  currency: string | null;
-  type: "收入" | "支出";
-  category: string | null;
-};
 
 async function extractFromImage(
   imageBase64: string,
@@ -35,12 +15,8 @@ async function extractFromImage(
   apiKey: string,
   expenseCategories: string[],
   incomeCategories: string[]
-): Promise<Extracted[]> {
-  const categoryLine = `"category": "先看上面判断的 type：如果是支出，从这个清单选一个最符合的（食＝餐厅、外卖、超市、咖啡；衣＝服饰、鞋子；住＝房租、水电、家具、日用品；行＝交通，包括 Grab、的士、油站、停车；转账给别人、汇款这类如果没有更贴切的分类就选其他支出）：${
-    expenseCategories.join("、") || "（没有）"
-  }。如果是收入，从这个清单选：${
-    incomeCategories.join("、") || "（没有）"
-  }。一定要原字不动地抄对应清单里的其中一个，实在判断不出来才填 null",`;
+): Promise<ExtractedTransaction[]> {
+  const categoryLine = categoryPromptLine(expenseCategories, incomeCategories);
 
   const prompt = `你在看一张财务相关的照片，可能是两种：
 (a) 一张购物收据 —— 只代表一笔交易，只抓 TOTAL / GRAND TOTAL / AMOUNT DUE 那一行的最终金额
@@ -84,41 +60,15 @@ async function extractFromImage(
   const text: string =
     data.candidates?.[0]?.content?.parts?.map((p: { text?: string }) => p.text ?? "").join("") ?? "";
 
-  const cleaned = text.trim().replace(/^```json\s*/i, "").replace(/^```\s*/i, "").replace(/```\s*$/i, "");
-
   try {
-    const parsed = JSON.parse(cleaned);
-    const list = Array.isArray(parsed) ? parsed : [parsed];
-    return list.map((parsed) => ({
-      merchant: parsed.merchant ?? null,
-      date: parsed.date ?? null,
-      total: typeof parsed.total === "number" ? parsed.total : parseFloat(parsed.total) || null,
-      currency: parsed.currency ?? null,
-      type: parsed.type === "收入" ? "收入" : "支出",
-      category: typeof parsed.category === "string" ? parsed.category : null,
-    }));
+    const list = parseGeminiJsonArray(text);
+    return list.map((item) =>
+      toExtractedTransaction(item as Parameters<typeof toExtractedTransaction>[0])
+    );
   } catch (err) {
     console.error("Failed to parse Gemini response:", text, err);
     throw new Error("看不懂 AI 回传的内容");
   }
-}
-
-async function convertToMYR(amount: number, currency: string): Promise<{ myrAmount: number; rate: number }> {
-  if (currency === "MYR") {
-    return { myrAmount: amount, rate: 1 };
-  }
-  const res = await fetch(
-    `https://api.frankfurter.app/latest?amount=${amount}&from=${currency}&to=MYR`
-  );
-  if (!res.ok) {
-    throw new Error(`不认识这个货币：${currency}`);
-  }
-  const data = await res.json();
-  const myrAmount = data.rates?.MYR;
-  if (typeof myrAmount !== "number") {
-    throw new Error(`换算不到 ${currency} 兑 MYR 的汇率`);
-  }
-  return { myrAmount, rate: myrAmount / amount };
 }
 
 export async function POST(req: NextRequest) {
@@ -154,31 +104,10 @@ export async function POST(req: NextRequest) {
       incomeCategories
     );
 
-    const valid = extractedList.filter((e) => e.total && e.total > 0);
-    if (valid.length === 0) {
+    const transactions = await finalizeTransactions(extractedList, expenseCategories, incomeCategories);
+    if (transactions.length === 0) {
       return NextResponse.json({ error: "看不出这张图片里的金额，请手动填写" }, { status: 422 });
     }
-
-    const transactions = await Promise.all(
-      valid.map(async (extracted) => {
-        const currency = normalizeCurrency(extracted.currency);
-        const { myrAmount, rate } = await convertToMYR(extracted.total as number, currency);
-        const validCategories = extracted.type === "收入" ? incomeCategories : expenseCategories;
-        const category =
-          extracted.category && validCategories.includes(extracted.category) ? extracted.category : null;
-
-        return {
-          merchant: extracted.merchant,
-          date: extracted.date,
-          originalAmount: extracted.total,
-          currency,
-          myrAmount,
-          rate,
-          type: extracted.type,
-          category,
-        };
-      })
-    );
 
     return NextResponse.json({ transactions });
   } catch (err) {
